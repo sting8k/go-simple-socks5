@@ -8,10 +8,12 @@ import (
     "io"
     "log"
     "net"
-    "strconv"
     "sync"
     "time"
 )
+
+// Variable for testing
+var dialTimeout = net.DialTimeout
 
 // handleConnection manages a single SOCKS5 client connection
 func handleConnection(clientConn net.Conn, cfg *Config) {
@@ -48,6 +50,7 @@ func handleConnection(clientConn net.Conn, cfg *Config) {
     }
 }
 
+// handleHandshake performs the SOCKS5 method negotiation phase
 func handleHandshake(clientConn net.Conn, cfg *Config) (byte, error) {
     reader := bufio.NewReader(clientConn)
 
@@ -72,7 +75,7 @@ func handleHandshake(clientConn net.Conn, cfg *Config) (byte, error) {
     }
 
     // Select authentication method
-    selectedMethod := AuthMethodNoAcceptable
+    var selectedMethod byte = AuthMethodNoAcceptable
     authRequired := cfg.Username != ""
 
     for _, method := range methods {
@@ -134,7 +137,7 @@ func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
     }
 
     // Verify credentials
-    status := AuthStatusFailure
+    var status byte = AuthStatusFailure
     if string(username) == cfg.Username && string(password) == cfg.Password {
         status = AuthStatusSuccess
     }
@@ -233,7 +236,7 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 func handleConnect(clientConn net.Conn, targetAddr string, port uint16, addrType byte) (net.Conn, error) {
     // Connect to target
     target := fmt.Sprintf("%s:%d", targetAddr, port)
-    targetConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+    targetConn, err := dialTimeout("tcp", target, 10*time.Second)
     if err != nil {
         sendReply(clientConn, ReplyHostUnreachable, nil, 0)
         return nil, fmt.Errorf("failed to connect to %s: %w", target, err)
@@ -274,20 +277,18 @@ func relayData(clientConn, targetConn net.Conn) error {
     var err error
 
     wg.Add(2)
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
+    done := make(chan struct{})
 
     // Client to target
     go func() {
         defer wg.Done()
-        defer cancel()
+        defer close(done)
         _, err = io.Copy(targetConn, clientConn)
     }()
 
     // Target to client
     go func() {
         defer wg.Done()
-        defer cancel()
         _, err = io.Copy(clientConn, targetConn)
     }()
 

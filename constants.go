@@ -5,10 +5,10 @@ const socks5Version = 0x05
 
 // Authentication Methods
 const (
-    AuthMethodNoAuthRequired = 0x00
-    AuthMethodGSSAPI        = 0x01
-    AuthMethodUserPass      = 0x02
-    AuthMethodNoAcceptable  = 0xFF
+    AuthMethodNoAuthRequired byte = 0x00
+    AuthMethodGSSAPI        byte = 0x01
+    AuthMethodUserPass      byte = 0x02
+    AuthMethodNoAcceptable  byte = 0xFF
 )
 
 // Username/Password Authentication Version
