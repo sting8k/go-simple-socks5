@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
+	"strconv"
 )
 
 // Config stores the SOCKS5 server configuration
@@ -29,9 +31,30 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("port is a required parameter")
 	}
 
+	// Validate port
+	if cfg.Port != "" {
+		if _, err := strconv.Atoi(cfg.Port); err != nil {
+			return nil, fmt.Errorf("invalid port number: %s", cfg.Port)
+		}
+	}
+
+	// Validate host IP
+	if cfg.Host != "0.0.0.0" && cfg.Host != "localhost" {
+		if ip := net.ParseIP(cfg.Host); ip == nil {
+			return nil, fmt.Errorf("invalid host IP address: %s", cfg.Host)
+		}
+	}
+
 	// If one credential is provided, both must be provided
 	if (cfg.Username != "" && cfg.Password == "") || (cfg.Username == "" && cfg.Password != "") {
 		return nil, fmt.Errorf("both username and password must be provided for authentication")
+	}
+
+	// Validate credential lengths if provided
+	if cfg.Username != "" {
+		if len(cfg.Username) > 255 || len(cfg.Password) > 255 {
+			return nil, fmt.Errorf("username and password must not exceed 255 characters")
+		}
 	}
 
 	// Initialize AuthTracker if authentication is enabled

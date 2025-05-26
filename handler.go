@@ -14,107 +14,38 @@ import (
 // Variable for testing
 var dialTimeout = net.DialTimeout
 
-// Max failed attempts before blocking
-const maxFailedAttempts = 5
-const blockDuration = 5 * time.Minute
-
-// Add near the top with other vars
-var validateIP = func(ip net.IP) error {
-	if ip == nil {
-		return fmt.Errorf("invalid IP address")
-	}
-	// Check for private networks
-	if ip.IsPrivate() || ip.IsLoopback() {
-		return fmt.Errorf("access to private/local networks not allowed")
-	}
-	return nil
-}
-
-// Add to handler.go
-type AuthTracker struct {
-	failedAttempts map[string]int
-	blockedClients map[string]time.Time
-	mu             sync.Mutex
-	cleanupTicker  *time.Ticker
-}
-
-// Config struct is defined in config.go; do not redefine here.
-
-func NewAuthTracker() *AuthTracker {
-	at := &AuthTracker{
-		failedAttempts: make(map[string]int),
-		blockedClients: make(map[string]time.Time),
-		cleanupTicker:  time.NewTicker(10 * time.Minute),
-	}
-	go at.cleanup()
-	return at
-}
-
-func (at *AuthTracker) cleanup() {
-	for range at.cleanupTicker.C {
-		at.mu.Lock()
-		now := time.Now()
-		// Cleanup old blocked entries
-		for ip, t := range at.blockedClients {
-			if now.After(t) {
-				delete(at.blockedClients, ip)
-				delete(at.failedAttempts, ip)
-			}
-		}
-		at.mu.Unlock()
-	}
-}
-
-func setConnTimeout(conn net.Conn) {
-	conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Minute))
-}
-
 // handleConnection manages a single SOCKS5 client connection
 func handleConnection(clientConn net.Conn, cfg *Config) {
 	defer clientConn.Close()
-	setConnTimeout(clientConn)
-	remoteAddr := clientConn.RemoteAddr().String()
-	log.Printf("Handler started for %s", remoteAddr)
+	log.Printf("Handler started for %s", clientConn.RemoteAddr())
 
 	// 1. SOCKS5 Handshake
 	selectedMethod, err := handleHandshake(clientConn, cfg)
 	if err != nil {
-		if err == io.EOF {
-			log.Printf("Client %s disconnected during handshake", remoteAddr)
-		} else {
-			log.Printf("Handshake failed for %s: %v", remoteAddr, err)
-		}
+		log.Printf("Handshake failed for %s: %v", clientConn.RemoteAddr(), err)
 		return
 	}
 
 	// 2. Authentication if required
 	if selectedMethod == AuthMethodUserPass {
 		if err := handleUserPassAuthentication(clientConn, cfg); err != nil {
-			if err == io.EOF {
-				log.Printf("Client %s disconnected during authentication", remoteAddr)
-			} else {
-				log.Printf("Authentication failed for %s: %v", remoteAddr, err)
-			}
+			log.Printf("Authentication failed for %s: %v", clientConn.RemoteAddr(), err)
 			return
 		}
 	}
 
 	// 3. Handle client request
-	if _, err := handleRequest(clientConn); err != nil {
-		log.Printf("Error handling request: %v", err)
-		// Do not terminate the server; continue processing other connections
+	targetConn, err := handleRequest(clientConn)
+	if err != nil {
+		log.Printf("Request handling failed for %s: %v", clientConn.RemoteAddr(), err)
 		return
 	}
+	defer targetConn.Close()
 
 	// 4. Relay data between connections
-	log.Printf("Starting data relay for %s <-> %s", remoteAddr, clientConn.RemoteAddr())
-	if err := relayData(clientConn, clientConn); err != nil {
-		if err == io.EOF {
-			log.Printf("Connection closed by peer %s", remoteAddr)
-		} else {
-			log.Printf("Data relay error for %s: %v", remoteAddr, err)
-		}
+	log.Printf("Starting data relay for %s <-> %s", clientConn.RemoteAddr(), targetConn.RemoteAddr())
+	if err := relayData(clientConn, targetConn); err != nil {
+		log.Printf("Data relay error for %s: %v", clientConn.RemoteAddr(), err)
 	}
 }
 
@@ -132,8 +63,8 @@ func handleHandshake(clientConn net.Conn, cfg *Config) (byte, error) {
 	}
 
 	nmethods, err := reader.ReadByte()
-	if err != nil || nmethods == 0 || nmethods > 255 {
-		return 0, fmt.Errorf("invalid nmethods value: %w", err)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read nmethods: %w", err)
 	}
 
 	// Read methods
@@ -170,25 +101,17 @@ func handleHandshake(clientConn net.Conn, cfg *Config) (byte, error) {
 	return selectedMethod, nil
 }
 
-// handleUserPassAuthentication performs username/password authentication with protections
 func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
-	clientAddr, _, _ := net.SplitHostPort(clientConn.RemoteAddr().String())
-
-	// Use global or passed AuthTracker instance
-	authTracker := cfg.AuthTracker
-	if authTracker == nil {
-		return fmt.Errorf("auth tracker not initialized")
-	}
-
-	// Check if client is blocked
-	authTracker.mu.Lock()
-	defer authTracker.mu.Unlock() // Use defer to avoid forgetting to unlock
-	if unblockTime, blocked := authTracker.blockedClients[clientAddr]; blocked {
-		if time.Now().Before(unblockTime) {
-			return fmt.Errorf("client %s is temporarily blocked", clientAddr)
+	// Check rate limiting first
+	if cfg.AuthTracker != nil {
+		clientIP := clientConn.RemoteAddr().(*net.TCPAddr).IP.String()
+		if cfg.AuthTracker.IsBlocked(clientIP) {
+			return fmt.Errorf("client %s is temporarily blocked", clientIP)
 		}
-		delete(authTracker.blockedClients, clientAddr) // Unblock client
 	}
+
+	clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer clientConn.SetReadDeadline(time.Time{}) // Reset deadline
 
 	reader := bufio.NewReader(clientConn)
 
@@ -197,14 +120,17 @@ func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to read auth version: %w", err)
 	}
+	if version != 0x01 {
+		return fmt.Errorf("unsupported auth version: %d", version)
+	}
 	if version != userPassAuthVersion {
 		return fmt.Errorf("unsupported auth version: %d", version)
 	}
 
 	// Read username length and username
 	ulen, err := reader.ReadByte()
-	if err != nil || ulen == 0 || ulen > 255 {
-		return fmt.Errorf("invalid username length: %w", err)
+	if err != nil {
+		return fmt.Errorf("failed to read username length: %w", err)
 	}
 
 	username := make([]byte, ulen)
@@ -214,8 +140,8 @@ func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
 
 	// Read password length and password
 	plen, err := reader.ReadByte()
-	if err != nil || plen == 0 || plen > 255 {
-		return fmt.Errorf("invalid password length: %w", err)
+	if err != nil {
+		return fmt.Errorf("failed to read password length: %w", err)
 	}
 
 	password := make([]byte, plen)
@@ -225,23 +151,23 @@ func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
 
 	// Verify credentials
 	var status byte = AuthStatusFailure
-	if secureCompare(username, []byte(cfg.Username)) &&
-		secureCompare(password, []byte(cfg.Password)) {
+	if string(username) == cfg.Username && string(password) == cfg.Password {
 		status = AuthStatusSuccess
+	} else if cfg.AuthTracker != nil {
+		// Track failed attempt
+		clientIP := clientConn.RemoteAddr().(*net.TCPAddr).IP.String()
+		cfg.AuthTracker.Track(clientIP)
+	}
+
+	// Send response
+	response := []byte{userPassAuthVersion, status}
+	if _, err := clientConn.Write(response); err != nil {
+		return fmt.Errorf("failed to send auth response: %w", err)
 	}
 
 	if status == AuthStatusFailure {
-		// Increment failed attempts
-		authTracker.failedAttempts[clientAddr]++
-		if authTracker.failedAttempts[clientAddr] >= maxFailedAttempts {
-			authTracker.blockedClients[clientAddr] = time.Now().Add(blockDuration)
-			log.Printf("Client %s is temporarily blocked due to repeated failed attempts", clientAddr)
-		}
 		return fmt.Errorf("invalid credentials")
 	}
-
-	// Reset failed attempts on successful authentication
-	delete(authTracker.failedAttempts, clientAddr)
 
 	return nil
 }
@@ -252,10 +178,6 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 	// Read version
 	version, err := reader.ReadByte()
 	if err != nil {
-		if err == io.EOF {
-			log.Printf("Client %s disconnected gracefully.", clientConn.RemoteAddr().String())
-			return nil, nil // Return nil instead of propagating EOF
-		}
 		return nil, fmt.Errorf("failed to read request version: %w", err)
 	}
 	if version != socks5Version {
@@ -265,29 +187,17 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 	// Read command
 	command, err := reader.ReadByte()
 	if err != nil {
-		if err == io.EOF {
-			log.Printf("Client %s disconnected gracefully.", clientConn.RemoteAddr().String())
-			return nil, err
-		}
 		return nil, fmt.Errorf("failed to read command: %w", err)
 	}
 
 	// Skip reserved byte
 	if _, err := reader.ReadByte(); err != nil {
-		if err == io.EOF {
-			log.Printf("Client %s disconnected gracefully.", clientConn.RemoteAddr().String())
-			return nil, err
-		}
 		return nil, fmt.Errorf("failed to read reserved byte: %w", err)
 	}
 
 	// Read address type
 	addrType, err := reader.ReadByte()
 	if err != nil {
-		if err == io.EOF {
-			log.Printf("Client %s disconnected gracefully.", clientConn.RemoteAddr().String())
-			return nil, err
-		}
 		return nil, fmt.Errorf("failed to read address type: %w", err)
 	}
 
@@ -299,11 +209,7 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 		if _, err := io.ReadFull(reader, addr); err != nil {
 			return nil, fmt.Errorf("failed to read IPv4 address: %w", err)
 		}
-		ip := net.IP(addr)
-		if err := validateIP(ip); err != nil {
-			return nil, err
-		}
-		targetAddr = ip.String()
+		targetAddr = net.IP(addr).String()
 
 	case AddrTypeDomain:
 		domainLen, err := reader.ReadByte()
@@ -313,9 +219,6 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 		domain := make([]byte, domainLen)
 		if _, err := io.ReadFull(reader, domain); err != nil {
 			return nil, fmt.Errorf("failed to read domain: %w", err)
-		}
-		if err := validateDomain(string(domain)); err != nil {
-			return nil, err
 		}
 		targetAddr = string(domain)
 
@@ -348,7 +251,17 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 }
 
 func handleConnect(clientConn net.Conn, targetAddr string, port uint16, addrType byte) (net.Conn, error) {
-	// Connect to target
+	// Add IP validation for direct IP connections
+	if addrType == AddrTypeIPv4 || addrType == AddrTypeIPv6 {
+		ip := net.ParseIP(targetAddr)
+		if ip != nil {
+			if err := validateIP(ip); err != nil {
+				sendReply(clientConn, ReplyConnectionNotAllowed, nil, 0)
+				return nil, err
+			}
+		}
+	}
+
 	target := fmt.Sprintf("%s:%d", targetAddr, port)
 	targetConn, err := dialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
@@ -388,43 +301,35 @@ func sendReply(conn net.Conn, reply byte, bindAddr net.IP, bindPort uint16) {
 
 func relayData(clientConn, targetConn net.Conn) error {
 	var wg sync.WaitGroup
-	var err error
+	errChan := make(chan error, 2) // Buffer for both goroutines' errors
 
 	wg.Add(2)
-	done := make(chan struct{})
 
 	// Client to target
 	go func() {
 		defer wg.Done()
-		defer close(done)
-		_, err = io.Copy(targetConn, clientConn)
+		if _, err := io.Copy(targetConn, clientConn); err != nil {
+			errChan <- fmt.Errorf("client->target error: %w", err)
+		}
 	}()
 
 	// Target to client
 	go func() {
 		defer wg.Done()
-		_, err = io.Copy(clientConn, targetConn)
+		if _, err := io.Copy(clientConn, targetConn); err != nil {
+			errChan <- fmt.Errorf("target->client error: %w", err)
+		}
 	}()
 
-	wg.Wait()
-	return err
-}
+	// Wait for completion
+	go func() {
+		wg.Wait()
+		close(errChan)
+	}()
 
-func validateDomain(domain string) error {
-	if len(domain) > 255 {
-		return fmt.Errorf("domain name too long")
+	// Return first error if any
+	if err := <-errChan; err != nil {
+		return err
 	}
-	// Add more domain validation rules
 	return nil
-}
-
-func secureCompare(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var v byte
-	for i := 0; i < len(a); i++ {
-		v |= a[i] ^ b[i]
-	}
-	return v == 0
 }

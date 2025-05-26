@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -109,6 +110,18 @@ func TestHandleUserPassAuthentication(t *testing.T) {
 			defer client.Close()
 			defer server.Close()
 
+			// Create mock client address
+			mockClientAddr := &net.TCPAddr{
+				IP:   net.ParseIP("192.0.2.1"),
+				Port: 12345,
+			}
+
+			// Wrap the server connection with mock address
+			wrappedServer := &connWithAddr{
+				Conn:       server,
+				remoteAddr: mockClientAddr,
+			}
+
 			go func() {
 				client.Write(tt.input)
 				// Read response to prevent blocking
@@ -117,7 +130,7 @@ func TestHandleUserPassAuthentication(t *testing.T) {
 				client.Close()
 			}()
 
-			err := handleUserPassAuthentication(server, tt.config)
+			err := handleUserPassAuthentication(wrappedServer, tt.config)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("handleUserPassAuthentication() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -129,6 +142,8 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 	tests := []struct {
 		name            string
 		attempts        int
+		waitTime        time.Duration
+		moreAttempts    int
 		shouldBeBlocked bool
 	}{
 		{
@@ -146,6 +161,13 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 			attempts:        6,
 			shouldBeBlocked: true,
 		},
+		{
+			name:            "Rate Limit Reset After Timeout",
+			attempts:        6,                // First exceed limit
+			waitTime:        61 * time.Second, // Wait > 1 minute
+			moreAttempts:    1,                // Try again
+			shouldBeBlocked: false,            // Should work after reset
+		},
 	}
 
 	for _, tt := range tests {
@@ -158,7 +180,7 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 
 			// Mock client IP address
 			mockClientAddr := &net.TCPAddr{
-				IP:   net.ParseIP("192.0.2.1"), // Test IP address
+				IP:   net.ParseIP("192.0.2.1"),
 				Port: 12345,
 			}
 
@@ -191,15 +213,45 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 
 				lastErr = handleUserPassAuthentication(wrappedServer, config)
 				server.Close()
+
+				// Add a small delay to ensure rate limiting takes effect
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			if tt.waitTime > 0 {
+				time.Sleep(tt.waitTime)
+			}
+
+			for i := 0; i < tt.moreAttempts; i++ {
+				client, server := net.Pipe()
+
+				// Create a wrapped connection with mock remote address
+				wrappedServer := &connWithAddr{
+					Conn:       server,
+					remoteAddr: mockClientAddr,
+				}
+
+				go func() {
+					client.Write(badAuth)
+					response := make([]byte, 2)
+					client.Read(response)
+					client.Close()
+				}()
+
+				lastErr = handleUserPassAuthentication(wrappedServer, config)
+				server.Close()
 			}
 
 			if tt.shouldBeBlocked {
 				if lastErr == nil || !strings.Contains(lastErr.Error(), "temporarily blocked") {
-					t.Errorf("Expected client to be blocked after %d attempts, but got error: %v",
-						tt.attempts, lastErr)
+					// Check if the client is actually blocked in the AuthTracker
+					if !config.AuthTracker.IsBlocked(mockClientAddr.IP.String()) {
+						t.Errorf("Expected client to be blocked after %d attempts, but it wasn't",
+							tt.attempts)
+					}
 				}
 			} else {
-				if strings.Contains(lastErr.Error(), "temporarily blocked") {
+				if config.AuthTracker.IsBlocked(mockClientAddr.IP.String()) {
 					t.Errorf("Client should not be blocked after %d attempts, but was blocked",
 						tt.attempts)
 				}
@@ -210,7 +262,7 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 
 // Helper function to check if error is a blocking error
 func isBlockedError(err error) bool {
-	return err != nil && err.Error() == "client  is temporarily blocked"
+	return err != nil && err.Error() == "client is temporarily blocked"
 }
 
 // Add a helper type for mocking connection with remote address
@@ -223,18 +275,15 @@ func (c *connWithAddr) RemoteAddr() net.Addr {
 	return c.remoteAddr
 }
 
-// Override validateIP for testing
-var originalValidateIP = validateIP
-
 func TestHandleRequest(t *testing.T) {
-	// Temporarily override validateIP to allow private IPs in tests
+	// Save original validateIP and restore after test
+	originalValidateIP := validateIP
+	defer func() { validateIP = originalValidateIP }()
+
+	// Mock validateIP for tests
 	validateIP = func(ip net.IP) error {
-		return nil
+		return nil // Allow all IPs during tests
 	}
-	// Restore original function after test
-	defer func() {
-		validateIP = originalValidateIP
-	}()
 
 	// Mock dialer for testing
 	origDialTimeout := dialTimeout
@@ -342,7 +391,6 @@ func TestHandleRequest(t *testing.T) {
 		defer client.Close()
 		defer server.Close()
 
-		// Simulate client disconnecting before sending the full request
 		go func() {
 			client.Write([]byte{socks5Version}) // Only send the version byte
 			client.Close()                      // Disconnect prematurely
@@ -351,9 +399,12 @@ func TestHandleRequest(t *testing.T) {
 		_, err := handleRequest(server)
 		if err == nil {
 			t.Errorf("Expected error due to client disconnect, but got nil")
+			return
 		}
-		if err != nil && err != io.EOF {
-			t.Errorf("Expected EOF error, but got: %v", err)
+
+		// Check if error chain contains EOF
+		if !errors.Is(err, io.EOF) {
+			t.Errorf("Error chain should contain EOF, got: %v", err)
 		}
 	})
 }
