@@ -33,7 +33,8 @@ func LoadConfig() (*Config, error) {
 
 	// Validate port
 	if cfg.Port != "" {
-		if _, err := strconv.Atoi(cfg.Port); err != nil {
+		portNum, err := strconv.Atoi(cfg.Port)
+		if err != nil || portNum < 1 || portNum > 65535 {
 			return nil, fmt.Errorf("invalid port number: %s", cfg.Port)
 		}
 	}
