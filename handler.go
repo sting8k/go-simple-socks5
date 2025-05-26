@@ -66,7 +66,6 @@ func (at *AuthTracker) cleanup() {
 }
 
 func setConnTimeout(conn net.Conn) {
-	// Increase timeouts if needed for your use case
 	conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Minute))
 }
@@ -102,20 +101,15 @@ func handleConnection(clientConn net.Conn, cfg *Config) {
 	}
 
 	// 3. Handle client request
-	targetConn, err := handleRequest(clientConn)
-	if err != nil {
-		if err == io.EOF {
-			log.Printf("Client %s disconnected before sending request", remoteAddr)
-		} else {
-			log.Printf("Request handling failed for %s: %v", remoteAddr, err)
-		}
+	if _, err := handleRequest(clientConn); err != nil {
+		log.Printf("Error handling request: %v", err)
+		// Do not terminate the server; continue processing other connections
 		return
 	}
-	defer targetConn.Close()
 
 	// 4. Relay data between connections
-	log.Printf("Starting data relay for %s <-> %s", remoteAddr, targetConn.RemoteAddr())
-	if err := relayData(clientConn, targetConn); err != nil {
+	log.Printf("Starting data relay for %s <-> %s", remoteAddr, clientConn.RemoteAddr())
+	if err := relayData(clientConn, clientConn); err != nil {
 		if err == io.EOF {
 			log.Printf("Connection closed by peer %s", remoteAddr)
 		} else {
@@ -188,14 +182,13 @@ func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
 
 	// Check if client is blocked
 	authTracker.mu.Lock()
+	defer authTracker.mu.Unlock() // Use defer to avoid forgetting to unlock
 	if unblockTime, blocked := authTracker.blockedClients[clientAddr]; blocked {
 		if time.Now().Before(unblockTime) {
-			authTracker.mu.Unlock()
 			return fmt.Errorf("client %s is temporarily blocked", clientAddr)
 		}
 		delete(authTracker.blockedClients, clientAddr) // Unblock client
 	}
-	authTracker.mu.Unlock()
 
 	reader := bufio.NewReader(clientConn)
 
@@ -239,20 +232,16 @@ func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
 
 	if status == AuthStatusFailure {
 		// Increment failed attempts
-		authTracker.mu.Lock()
 		authTracker.failedAttempts[clientAddr]++
 		if authTracker.failedAttempts[clientAddr] >= maxFailedAttempts {
 			authTracker.blockedClients[clientAddr] = time.Now().Add(blockDuration)
 			log.Printf("Client %s is temporarily blocked due to repeated failed attempts", clientAddr)
 		}
-		authTracker.mu.Unlock()
 		return fmt.Errorf("invalid credentials")
 	}
 
 	// Reset failed attempts on successful authentication
-	authTracker.mu.Lock()
 	delete(authTracker.failedAttempts, clientAddr)
-	authTracker.mu.Unlock()
 
 	return nil
 }
@@ -264,8 +253,8 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 	version, err := reader.ReadByte()
 	if err != nil {
 		if err == io.EOF {
-			log.Printf("Client %s disconnected before sending request", clientConn.RemoteAddr().String())
-			return nil, err
+			log.Printf("Client %s disconnected gracefully.", clientConn.RemoteAddr().String())
+			return nil, nil // Return nil instead of propagating EOF
 		}
 		return nil, fmt.Errorf("failed to read request version: %w", err)
 	}
@@ -277,7 +266,7 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 	command, err := reader.ReadByte()
 	if err != nil {
 		if err == io.EOF {
-			log.Printf("Client %s disconnected before sending command", clientConn.RemoteAddr().String())
+			log.Printf("Client %s disconnected gracefully.", clientConn.RemoteAddr().String())
 			return nil, err
 		}
 		return nil, fmt.Errorf("failed to read command: %w", err)
@@ -286,7 +275,7 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 	// Skip reserved byte
 	if _, err := reader.ReadByte(); err != nil {
 		if err == io.EOF {
-			log.Printf("Client %s disconnected before sending reserved byte", clientConn.RemoteAddr().String())
+			log.Printf("Client %s disconnected gracefully.", clientConn.RemoteAddr().String())
 			return nil, err
 		}
 		return nil, fmt.Errorf("failed to read reserved byte: %w", err)
@@ -296,7 +285,7 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 	addrType, err := reader.ReadByte()
 	if err != nil {
 		if err == io.EOF {
-			log.Printf("Client %s disconnected before sending address type", clientConn.RemoteAddr().String())
+			log.Printf("Client %s disconnected gracefully.", clientConn.RemoteAddr().String())
 			return nil, err
 		}
 		return nil, fmt.Errorf("failed to read address type: %w", err)
