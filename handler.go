@@ -263,6 +263,10 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 	// Read version
 	version, err := reader.ReadByte()
 	if err != nil {
+		if err == io.EOF {
+			log.Printf("Client %s disconnected before sending request", clientConn.RemoteAddr().String())
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to read request version: %w", err)
 	}
 	if version != socks5Version {
@@ -272,17 +276,29 @@ func handleRequest(clientConn net.Conn) (net.Conn, error) {
 	// Read command
 	command, err := reader.ReadByte()
 	if err != nil {
+		if err == io.EOF {
+			log.Printf("Client %s disconnected before sending command", clientConn.RemoteAddr().String())
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to read command: %w", err)
 	}
 
 	// Skip reserved byte
 	if _, err := reader.ReadByte(); err != nil {
+		if err == io.EOF {
+			log.Printf("Client %s disconnected before sending reserved byte", clientConn.RemoteAddr().String())
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to read reserved byte: %w", err)
 	}
 
 	// Read address type
 	addrType, err := reader.ReadByte()
 	if err != nil {
+		if err == io.EOF {
+			log.Printf("Client %s disconnected before sending address type", clientConn.RemoteAddr().String())
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to read address type: %w", err)
 	}
 

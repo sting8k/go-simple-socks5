@@ -336,6 +336,26 @@ func TestHandleRequest(t *testing.T) {
 			<-done
 		})
 	}
+
+	t.Run("Client Disconnect", func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+
+		// Simulate client disconnecting before sending the full request
+		go func() {
+			client.Write([]byte{socks5Version}) // Only send the version byte
+			client.Close()                      // Disconnect prematurely
+		}()
+
+		_, err := handleRequest(server)
+		if err == nil {
+			t.Errorf("Expected error due to client disconnect, but got nil")
+		}
+		if err != nil && err != io.EOF {
+			t.Errorf("Expected EOF error, but got: %v", err)
+		}
+	})
 }
 
 func TestRelayData(t *testing.T) {
