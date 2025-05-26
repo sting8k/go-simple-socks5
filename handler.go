@@ -2,7 +2,6 @@ package main
 
 import (
     "bufio"
-    "context"
     "encoding/binary"
     "fmt"
     "io"
