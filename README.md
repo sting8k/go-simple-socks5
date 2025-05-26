@@ -12,12 +12,13 @@ This project was totally developed by AI assistance, specifically:
 
 ## Features
 
-- SOCKS5 protocol support
-- IPv4, IPv6, and domain name resolution
+- SOCKS5 protocol support (RFC 1928)
 - Username/password authentication (RFC 1929)
 - Connection timeout handling
-- Graceful shutdown
-- Comprehensive test coverage
+- Rate limiting for authentication attempts
+- IP filtering for private/local addresses
+- Clean concurrent connection handling
+- Graceful shutdown support
 
 ## Installation
 
