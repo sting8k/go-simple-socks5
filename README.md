@@ -2,6 +2,14 @@
 
 A lightweight SOCKS5 proxy server implementation in Go, following RFC 1928 specification.
 
+## Why This Project?
+
+I created this project out of necessity when Telegram was blocked in my country. I needed a quick, reliable SOCKS5 proxy that I could deploy on my server to maintain access to essential communication services. The goal was to build something lightweight and straightforward that just works, without unnecessary complexity.
+
+This project was totally developed by AI assistance, specifically:
+- Gemini 2.5 Pro
+- Claude 3.5 Sonnet
+
 ## Features
 
 - SOCKS5 protocol support
