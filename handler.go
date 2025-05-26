@@ -66,6 +66,7 @@ func (at *AuthTracker) cleanup() {
 }
 
 func setConnTimeout(conn net.Conn) {
+	// Increase timeouts if needed for your use case
 	conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Minute))
 }
@@ -74,19 +75,28 @@ func setConnTimeout(conn net.Conn) {
 func handleConnection(clientConn net.Conn, cfg *Config) {
 	defer clientConn.Close()
 	setConnTimeout(clientConn)
-	log.Printf("Handler started for %s", clientConn.RemoteAddr())
+	remoteAddr := clientConn.RemoteAddr().String()
+	log.Printf("Handler started for %s", remoteAddr)
 
 	// 1. SOCKS5 Handshake
 	selectedMethod, err := handleHandshake(clientConn, cfg)
 	if err != nil {
-		log.Printf("Handshake failed for %s: %v", clientConn.RemoteAddr(), err)
+		if err == io.EOF {
+			log.Printf("Client %s disconnected during handshake", remoteAddr)
+		} else {
+			log.Printf("Handshake failed for %s: %v", remoteAddr, err)
+		}
 		return
 	}
 
 	// 2. Authentication if required
 	if selectedMethod == AuthMethodUserPass {
 		if err := handleUserPassAuthentication(clientConn, cfg); err != nil {
-			log.Printf("Authentication failed for %s: %v", clientConn.RemoteAddr(), err)
+			if err == io.EOF {
+				log.Printf("Client %s disconnected during authentication", remoteAddr)
+			} else {
+				log.Printf("Authentication failed for %s: %v", remoteAddr, err)
+			}
 			return
 		}
 	}
@@ -94,15 +104,23 @@ func handleConnection(clientConn net.Conn, cfg *Config) {
 	// 3. Handle client request
 	targetConn, err := handleRequest(clientConn)
 	if err != nil {
-		log.Printf("Request handling failed for %s: %v", clientConn.RemoteAddr(), err)
+		if err == io.EOF {
+			log.Printf("Client %s disconnected before sending request", remoteAddr)
+		} else {
+			log.Printf("Request handling failed for %s: %v", remoteAddr, err)
+		}
 		return
 	}
 	defer targetConn.Close()
 
 	// 4. Relay data between connections
-	log.Printf("Starting data relay for %s <-> %s", clientConn.RemoteAddr(), targetConn.RemoteAddr())
+	log.Printf("Starting data relay for %s <-> %s", remoteAddr, targetConn.RemoteAddr())
 	if err := relayData(clientConn, targetConn); err != nil {
-		log.Printf("Data relay error for %s: %v", clientConn.RemoteAddr(), err)
+		if err == io.EOF {
+			log.Printf("Connection closed by peer %s", remoteAddr)
+		} else {
+			log.Printf("Data relay error for %s: %v", remoteAddr, err)
+		}
 	}
 }
 
