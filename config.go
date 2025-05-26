@@ -18,6 +18,7 @@ type Config struct {
 
 // LoadConfig parses command-line flags and returns a Config struct
 func LoadConfig() (*Config, error) {
+	showVersion := flag.Bool("version", false, "Show version and exit")
 	cfg := &Config{}
 
 	flag.StringVar(&cfg.Host, "host", "0.0.0.0", "Host IP address to listen on")
@@ -26,6 +27,11 @@ func LoadConfig() (*Config, error) {
 	flag.StringVar(&cfg.Password, "password", "", "Password for SOCKS5 authentication (optional)")
 
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("go-simple-socks5 version %s\n", AppVersion)
+		return nil, fmt.Errorf("version shown")
+	}
 
 	if cfg.Port == "" {
 		return nil, fmt.Errorf("port is a required parameter")
