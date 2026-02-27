@@ -3,7 +3,7 @@ package main
 // SOCKS5 Version
 const socks5Version = 0x05
 
-const AppVersion = "1.0.1"
+const AppVersion = "1.1.0"
 
 // Authentication Methods
 const (
