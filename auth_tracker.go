@@ -34,7 +34,7 @@ func (a *AuthTracker) IsBlocked(ip string) bool {
 
 	now := time.Now()
 	attempts := a.attempts[ip]
-	threshold := now.Add(-1 * time.Minute) // 1-minute window
+	threshold := now.Add(-15 * time.Minute) // 15-minute window
 
 	// Filter attempts within the threshold
 	var recentAttempts []time.Time
