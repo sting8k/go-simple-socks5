@@ -14,12 +14,14 @@ type Server struct {
     listener net.Listener
     wg       sync.WaitGroup // To wait for all client handlers to finish
     mu       sync.Mutex     // For protecting access to listener during shutdown
+    sem      chan struct{}   // Semaphore for limiting concurrent connections
 }
 
 // NewServer creates a new SOCKS5 server instance
 func NewServer(cfg *Config) (*Server, error) {
     return &Server{
         config: cfg,
+        sem:    make(chan struct{}, cfg.MaxConnections),
     }, nil
 }
 
@@ -70,11 +72,20 @@ func (s *Server) Start(ctx context.Context) error {
         }
 
         log.Printf("Accepted connection from %s", conn.RemoteAddr())
-        s.wg.Add(1)
-        go func() {
-            defer s.wg.Done()
-            handleConnection(conn, s.config)
-        }()
+
+        // Acquire semaphore slot, reject if at capacity
+        select {
+        case s.sem <- struct{}{}:
+            s.wg.Add(1)
+            go func() {
+                defer s.wg.Done()
+                defer func() { <-s.sem }()
+                handleConnection(conn, s.config)
+            }()
+        default:
+            log.Printf("Max connections (%d) reached, rejecting %s", s.config.MaxConnections, conn.RemoteAddr())
+            conn.Close()
+        }
     }
 }
 

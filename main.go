@@ -22,7 +22,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	log.Println("SOCKS5 Proxy starting...")
-	log.Printf("Configuration: Host=%s, Port=%s, AuthEnabled=%t", cfg.Host, cfg.Port, cfg.Username != "")
+	log.Printf("Configuration: Host=%s, Port=%s, AuthEnabled=%t, MaxConnections=%d", cfg.Host, cfg.Port, cfg.Username != "", cfg.MaxConnections)
 
 	socksServer, err := NewServer(cfg)
 	if err != nil {

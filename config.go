@@ -9,11 +9,12 @@ import (
 
 // Config stores the SOCKS5 server configuration
 type Config struct {
-	Host        string       // Host address to listen on
-	Port        string       // Port to listen on
-	Username    string       // Optional username for authentication
-	Password    string       // Optional password for authentication
-	AuthTracker *AuthTracker // Authentication tracking instance
+	Host           string       // Host address to listen on
+	Port           string       // Port to listen on
+	Username       string       // Optional username for authentication
+	Password       string       // Optional password for authentication
+	AuthTracker    *AuthTracker // Authentication tracking instance
+	MaxConnections int          // Maximum concurrent connections (0 = default 256)
 }
 
 // LoadConfig parses command-line flags and returns a Config struct
@@ -25,6 +26,7 @@ func LoadConfig() (*Config, error) {
 	flag.StringVar(&cfg.Port, "port", "", "Port to listen on (required)")
 	flag.StringVar(&cfg.Username, "username", "", "Username for SOCKS5 authentication (optional)")
 	flag.StringVar(&cfg.Password, "password", "", "Password for SOCKS5 authentication (optional)")
+	flag.IntVar(&cfg.MaxConnections, "max-connections", 256, "Maximum concurrent connections (default: 256)")
 
 	flag.Parse()
 
@@ -62,6 +64,10 @@ func LoadConfig() (*Config, error) {
 		if len(cfg.Username) > 255 || len(cfg.Password) > 255 {
 			return nil, fmt.Errorf("username and password must not exceed 255 characters")
 		}
+	}
+
+	if cfg.MaxConnections <= 0 {
+		cfg.MaxConnections = 256
 	}
 
 	// Initialize AuthTracker if authentication is enabled

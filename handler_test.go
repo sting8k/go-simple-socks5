@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -50,7 +51,7 @@ func TestHandleHandshake(t *testing.T) {
 				client.Close()
 			}()
 
-			method, err := handleHandshake(server, tt.config)
+			method, err := handleHandshake(bufio.NewReader(server), server, tt.config)
 			if (err != nil) != tt.wantError {
 				t.Errorf("handleHandshake() error = %v, wantError %v", err, tt.wantError)
 				return
@@ -74,15 +75,15 @@ func TestHandleUserPassAuthentication(t *testing.T) {
 			name: "Valid Credentials",
 			input: []byte{
 				userPassAuthVersion,
-				4,                  // username length
+				4,                   // username length
 				'u', 's', 'e', 'r', // username
-				4,                  // password length
+				4,                   // password length
 				'p', 'a', 's', 's', // password
 			},
 			config: &Config{
 				Username:    "user",
 				Password:    "pass",
-				AuthTracker: NewAuthTracker(), // Initialize AuthTracker
+				AuthTracker: NewAuthTracker(),
 			},
 			wantErr: false,
 		},
@@ -90,15 +91,15 @@ func TestHandleUserPassAuthentication(t *testing.T) {
 			name: "Invalid Credentials",
 			input: []byte{
 				userPassAuthVersion,
-				4,                  // username length
+				4,                   // username length
 				'u', 's', 'e', 'r', // username
-				4,                  // password length
+				4,                   // password length
 				'w', 'r', 'o', 'n', // wrong password
 			},
 			config: &Config{
 				Username:    "user",
 				Password:    "pass",
-				AuthTracker: NewAuthTracker(), // Initialize AuthTracker
+				AuthTracker: NewAuthTracker(),
 			},
 			wantErr: true,
 		},
@@ -130,7 +131,7 @@ func TestHandleUserPassAuthentication(t *testing.T) {
 				client.Close()
 			}()
 
-			err := handleUserPassAuthentication(wrappedServer, tt.config)
+			err := handleUserPassAuthentication(bufio.NewReader(wrappedServer), wrappedServer, tt.config)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("handleUserPassAuthentication() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -145,6 +146,7 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 		waitTime        time.Duration
 		moreAttempts    int
 		shouldBeBlocked bool
+		longRunning     bool
 	}{
 		{
 			name:            "Under Max Attempts",
@@ -167,11 +169,18 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 			waitTime:        61 * time.Second, // Wait > 1 minute
 			moreAttempts:    1,                // Try again
 			shouldBeBlocked: false,            // Should work after reset
+			longRunning:     true,             // Skip unless -timeout is large enough
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.longRunning {
+				if testing.Short() {
+					t.Skip("skipping long-running test in short mode")
+				}
+			}
+
 			config := &Config{
 				Username:    "user",
 				Password:    "pass",
@@ -187,9 +196,9 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 			// Invalid credentials for testing
 			badAuth := []byte{
 				userPassAuthVersion,
-				4,                  // username length
+				4,                   // username length
 				'u', 's', 'e', 'r', // username
-				4,                  // password length
+				4,                   // password length
 				'w', 'r', 'o', 'n', // wrong password
 			}
 
@@ -211,7 +220,7 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 					client.Close()
 				}()
 
-				lastErr = handleUserPassAuthentication(wrappedServer, config)
+				lastErr = handleUserPassAuthentication(bufio.NewReader(wrappedServer), wrappedServer, config)
 				server.Close()
 
 				// Add a small delay to ensure rate limiting takes effect
@@ -238,13 +247,12 @@ func TestAuthenticationRateLimiting(t *testing.T) {
 					client.Close()
 				}()
 
-				lastErr = handleUserPassAuthentication(wrappedServer, config)
+				lastErr = handleUserPassAuthentication(bufio.NewReader(wrappedServer), wrappedServer, config)
 				server.Close()
 			}
 
 			if tt.shouldBeBlocked {
 				if lastErr == nil || !strings.Contains(lastErr.Error(), "temporarily blocked") {
-					// Check if the client is actually blocked in the AuthTracker
 					if !config.AuthTracker.IsBlocked(mockClientAddr.IP.String()) {
 						t.Errorf("Expected client to be blocked after %d attempts, but it wasn't",
 							tt.attempts)
@@ -375,7 +383,7 @@ func TestHandleRequest(t *testing.T) {
 				client.Close()
 			}()
 
-			conn, err := handleRequest(server)
+			conn, err := handleRequest(bufio.NewReader(server), server)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("handleRequest() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -393,10 +401,10 @@ func TestHandleRequest(t *testing.T) {
 
 		go func() {
 			client.Write([]byte{socks5Version}) // Only send the version byte
-			client.Close()                      // Disconnect prematurely
+			client.Close()                       // Disconnect prematurely
 		}()
 
-		_, err := handleRequest(server)
+		_, err := handleRequest(bufio.NewReader(server), server)
 		if err == nil {
 			t.Errorf("Expected error due to client disconnect, but got nil")
 			return

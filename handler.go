@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"sync"
 	"time"
 )
 
@@ -19,8 +19,14 @@ func handleConnection(clientConn net.Conn, cfg *Config) {
 	defer clientConn.Close()
 	log.Printf("Handler started for %s", clientConn.RemoteAddr())
 
+	// Create a single buffered reader for the entire connection lifetime
+	reader := bufio.NewReader(clientConn)
+
+	// Set deadline for handshake + auth phase to prevent slowloris attacks
+	clientConn.SetDeadline(time.Now().Add(30 * time.Second))
+
 	// 1. SOCKS5 Handshake
-	selectedMethod, err := handleHandshake(clientConn, cfg)
+	selectedMethod, err := handleHandshake(reader, clientConn, cfg)
 	if err != nil {
 		log.Printf("Handshake failed for %s: %v", clientConn.RemoteAddr(), err)
 		return
@@ -28,19 +34,22 @@ func handleConnection(clientConn net.Conn, cfg *Config) {
 
 	// 2. Authentication if required
 	if selectedMethod == AuthMethodUserPass {
-		if err := handleUserPassAuthentication(clientConn, cfg); err != nil {
+		if err := handleUserPassAuthentication(reader, clientConn, cfg); err != nil {
 			log.Printf("Authentication failed for %s: %v", clientConn.RemoteAddr(), err)
 			return
 		}
 	}
 
 	// 3. Handle client request
-	targetConn, err := handleRequest(clientConn)
+	targetConn, err := handleRequest(reader, clientConn)
 	if err != nil {
 		log.Printf("Request handling failed for %s: %v", clientConn.RemoteAddr(), err)
 		return
 	}
 	defer targetConn.Close()
+
+	// Clear deadline before relay phase (relay can be long-lived)
+	clientConn.SetDeadline(time.Time{})
 
 	// 4. Relay data between connections
 	log.Printf("Starting data relay for %s <-> %s", clientConn.RemoteAddr(), targetConn.RemoteAddr())
@@ -50,8 +59,7 @@ func handleConnection(clientConn net.Conn, cfg *Config) {
 }
 
 // handleHandshake performs the SOCKS5 method negotiation phase
-func handleHandshake(clientConn net.Conn, cfg *Config) (byte, error) {
-	reader := bufio.NewReader(clientConn)
+func handleHandshake(reader *bufio.Reader, clientConn net.Conn, cfg *Config) (byte, error) {
 
 	// Read version and number of methods
 	version, err := reader.ReadByte()
@@ -101,7 +109,7 @@ func handleHandshake(clientConn net.Conn, cfg *Config) (byte, error) {
 	return selectedMethod, nil
 }
 
-func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
+func handleUserPassAuthentication(reader *bufio.Reader, clientConn net.Conn, cfg *Config) error {
 	// Check rate limiting first
 	if cfg.AuthTracker != nil {
 		clientIP := clientConn.RemoteAddr().(*net.TCPAddr).IP.String()
@@ -110,18 +118,10 @@ func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
 		}
 	}
 
-	clientConn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	defer clientConn.SetReadDeadline(time.Time{}) // Reset deadline
-
-	reader := bufio.NewReader(clientConn)
-
 	// Read auth version
 	version, err := reader.ReadByte()
 	if err != nil {
 		return fmt.Errorf("failed to read auth version: %w", err)
-	}
-	if version != 0x01 {
-		return fmt.Errorf("unsupported auth version: %d", version)
 	}
 	if version != userPassAuthVersion {
 		return fmt.Errorf("unsupported auth version: %d", version)
@@ -149,9 +149,11 @@ func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
 		return fmt.Errorf("failed to read password: %w", err)
 	}
 
-	// Verify credentials
+	// Verify credentials using constant-time comparison to prevent timing attacks
 	var status byte = AuthStatusFailure
-	if string(username) == cfg.Username && string(password) == cfg.Password {
+	usernameMatch := subtle.ConstantTimeCompare(username, []byte(cfg.Username))
+	passwordMatch := subtle.ConstantTimeCompare(password, []byte(cfg.Password))
+	if usernameMatch == 1 && passwordMatch == 1 {
 		status = AuthStatusSuccess
 	} else if cfg.AuthTracker != nil {
 		// Track failed attempt
@@ -172,8 +174,7 @@ func handleUserPassAuthentication(clientConn net.Conn, cfg *Config) error {
 	return nil
 }
 
-func handleRequest(clientConn net.Conn) (net.Conn, error) {
-	reader := bufio.NewReader(clientConn)
+func handleRequest(reader *bufio.Reader, clientConn net.Conn) (net.Conn, error) {
 
 	// Read version
 	version, err := reader.ReadByte()
@@ -300,36 +301,26 @@ func sendReply(conn net.Conn, reply byte, bindAddr net.IP, bindPort uint16) {
 }
 
 func relayData(clientConn, targetConn net.Conn) error {
-	var wg sync.WaitGroup
-	errChan := make(chan error, 2) // Buffer for both goroutines' errors
+	errc := make(chan error, 2)
 
-	wg.Add(2)
-
-	// Client to target
+	// Client -> Target
 	go func() {
-		defer wg.Done()
-		if _, err := io.Copy(targetConn, clientConn); err != nil {
-			errChan <- fmt.Errorf("client->target error: %w", err)
-		}
+		_, err := io.Copy(targetConn, clientConn)
+		errc <- err
 	}()
 
-	// Target to client
+	// Target -> Client
 	go func() {
-		defer wg.Done()
-		if _, err := io.Copy(clientConn, targetConn); err != nil {
-			errChan <- fmt.Errorf("target->client error: %w", err)
-		}
+		_, err := io.Copy(clientConn, targetConn)
+		errc <- err
 	}()
 
-	// Wait for completion
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
+	// When one direction finishes, close both connections
+	// so the other direction unblocks and finishes too
+	err := <-errc
+	clientConn.Close()
+	targetConn.Close()
+	<-errc // wait for the other goroutine to finish
 
-	// Return first error if any
-	if err := <-errChan; err != nil {
-		return err
-	}
-	return nil
+	return err
 }
